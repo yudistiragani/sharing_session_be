@@ -1,7 +1,7 @@
-from typing import Optional, List, Literal
 from pydantic import BaseModel, Field
 from bson import ObjectId
 from datetime import datetime
+from typing import Optional, Literal
 
 class PyObjectId(ObjectId):
     @classmethod
@@ -15,31 +15,22 @@ class PyObjectId(ObjectId):
             return ObjectId(v)
         return core_schema.no_info_after_validator_function(validate, core_schema.str_schema())
 
-ProductStatus = Literal["active", "inactive"]
+CategoryStatus = Literal["active", "inactive"]
 
-class ProductBase(BaseModel):
+class CategoryBase(BaseModel):
     name: str
-    description: Optional[str] = None
-    price: float = 0.0
-    category_id: Optional[PyObjectId] = None
-    images: List[str] = []
-    stock: int = 0
-    low_stock_threshold: int = 0
-    status: ProductStatus = "active"
+    slug: Optional[str] = None
+    status: CategoryStatus = "active"
 
-class ProductCreate(ProductBase):
+class CategoryCreate(CategoryBase):
     pass
 
-class ProductUpdate(BaseModel):
+class CategoryUpdate(BaseModel):
     name: Optional[str] = None
-    description: Optional[str] = None
-    price: Optional[float] = None
-    category_id: Optional[PyObjectId] = None
-    stock: Optional[int] = None
-    low_stock_threshold: Optional[int] = None
-    status: Optional[ProductStatus] = None
+    slug: Optional[str] = None
+    status: Optional[CategoryStatus] = None
 
-class ProductInDB(ProductBase):
+class CategoryInDB(CategoryBase):
     id: PyObjectId = Field(alias="_id")
     created_at: datetime
     updated_at: datetime
@@ -49,7 +40,7 @@ class ProductInDB(ProductBase):
         "json_encoders": {ObjectId: str, datetime: lambda d: d.isoformat()}
     }
 
-class ProductPublic(ProductBase):
+class CategoryPublic(CategoryBase):
     id: PyObjectId = Field(alias="_id")
     created_at: datetime
     updated_at: datetime

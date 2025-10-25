@@ -1,6 +1,8 @@
 import os
+
+from pathlib import Path
 from datetime import datetime, timezone
-from typing import Optional, Callable
+from typing import Optional, Callable, Sequence, List
 from fastapi import Depends, HTTPException, UploadFile
 from fastapi.security import OAuth2PasswordBearer
 from app.core.security import decode_token
@@ -53,3 +55,79 @@ async def save_upload_file(file: UploadFile, base_dir: str, sub_dir: str, prefix
     with open(abs_path, "wb") as f:
         f.write(content)
     return f"/uploads/{rel_path}"
+
+
+def _public_upload_to_abs(public_path: Optional[str]) -> Optional[Path]:
+    """
+    Konversi path public '/uploads/xxx' -> absolute path di filesystem.
+    Return None jika formatnya tidak valid / di luar UPLOAD_DIR.
+    """
+    if not public_path or not public_path.startswith("/uploads/"):
+        return None
+    # buang prefix route '/uploads/' lalu gabungkan dengan folder fisik settings.UPLOAD_DIR
+    rel = public_path[len("/uploads/"):]
+    base = Path(settings.UPLOAD_DIR).resolve()
+    cand = (base / rel).resolve()
+    try:
+        # Python 3.10+: pastikan masih di bawah base
+        if not str(cand).startswith(str(base)):
+            return None
+    except Exception:
+        return None
+    return cand
+
+def delete_public_upload_safe(public_path: Optional[str]) -> bool:
+    """
+    Hapus file upload berdasarkan path public ('/uploads/...').
+    Mengembalikan True jika berhasil dihapus, False jika tidak ada / gagal (tanpa raise).
+    """
+    p = _public_upload_to_abs(public_path)
+    if not p:
+        return False
+    try:
+        if p.exists() and p.is_file():
+            p.unlink()
+            return True
+    except Exception:
+        pass
+    return False
+
+
+async def normalize_upload_list(files: Optional[Sequence[UploadFile | None]]) -> List[UploadFile]:
+    """
+    Buang item kosong/invalid dari array file (Swagger kadang kirim 'images=' jadi string kosong).
+    Return hanya UploadFile valid dengan filename & isi > 0 byte.
+    """
+    out: List[UploadFile] = []
+    if not files:
+        return out
+    for f in files:
+        if not f or not getattr(f, "filename", ""):
+            continue
+        # Peek 1 byte untuk pastikan tidak kosong
+        pos = await f.seek(0, 1)  # dapatkan posisi saat ini (untuk kompat)
+        await f.seek(0)
+        head = await f.read(1)
+        await f.seek(0)
+        if not head:
+            continue
+        out.append(f)
+    return out
+
+
+def encode_mongo(obj):
+    """
+    Recursively convert Mongo types so FastAPI can JSON-encode them.
+    - ObjectId -> str
+    - datetime -> isoformat
+    - list/dict -> traverse
+    """
+    if isinstance(obj, ObjectId):
+        return str(obj)
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, list):
+        return [encode_mongo(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: encode_mongo(v) for k, v in obj.items()}
+    return obj

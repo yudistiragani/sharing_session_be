@@ -7,9 +7,10 @@ from datetime import datetime, timezone
 from app.db.mongodb_config import get_db
 from app.core.config import settings
 from app.core.security import create_access_token, verify_password, hash_password, decode_token
-from app.api.v1.endpoints.utils import get_current_user, save_upload_file, require_admin
+from app.api.v1.endpoints.utils import get_current_user, save_upload_file, require_admin, delete_public_upload_safe
 
-router = APIRouter(tags=["Users"])
+router = APIRouter(tags=["Users"], dependencies=[Depends(require_admin)])
+# router = APIRouter(tags=["Users"], dependencies=None)
 
 
 @router.post("")
@@ -20,7 +21,7 @@ async def create_user(
     phone_number: str | None = Form(None),
     role: str = Form("user", pattern="^(admin|user)$"),
     status: str = Form("active", pattern="^(active|inactive)$"),
-    profile_image: UploadFile = File(None),
+    profile_image: UploadFile | None | str = File(None),
     db=Depends(get_db),
 ):
     existing = await db.users.find_one({"email": email})
@@ -28,8 +29,12 @@ async def create_user(
         raise HTTPException(status_code=400, detail="Email already exists")
 
     # Simpan gambar jika ada
+    if isinstance(profile_image, str) and profile_image == "":
+        profile_image = None
+
     image_path = None
-    if profile_image is not None and profile_image.filename:
+    if profile_image is not None and not isinstance(profile_image, str) \
+            and profile_image != "" and profile_image.filename:
         image_path = await save_upload_file(
             profile_image,
             base_dir=settings.UPLOAD_DIR,
@@ -55,7 +60,7 @@ async def create_user(
     return {"message": "User created successfully", "user": user}
 
 
-@router.get("", dependencies=[Depends(require_admin)])
+@router.get("")
 async def list_users(
     db=Depends(get_db),
     page: int = Query(1, ge=1),
@@ -117,16 +122,23 @@ async def update_user(
     user_id: str,
     full_name: Optional[str] = Form(None),
     phone_number: Optional[str] = Form(None),
-    status: Optional[str] = Form(None, pattern="^(active|inactive)$"),
-    profile_image: UploadFile = File(None),
+    status: Optional[str] = Form(None, pattern="^(active|inactive|)$"),
+    profile_image: UploadFile | None | str = File(None),
     db=Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     if not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=400, detail="Invalid user id")
 
-    if str(current_user["_id"]) != user_id and current_user.get("role") != "admin":
+    if str(current_user["_id"]) != user_id and current_user.get(
+            "role") != "admin":
         raise HTTPException(status_code=403, detail="Forbidden")
+
+        # Ambil dokumen lama (untuk cleanup gambar lama kalau ganti)
+    old = await db.users.find_one({"_id": ObjectId(user_id)},
+                                  {"hashed_password": 0})
+    if not old:
+        raise HTTPException(status_code=404, detail="User not found")
 
     update = {}
     if full_name is not None:
@@ -134,10 +146,10 @@ async def update_user(
     if phone_number is not None:
         update["phone_number"] = phone_number
     if status is not None and current_user.get("role") == "admin":
-        # hanya admin boleh ubah status
         update["status"] = status
 
-    if profile_image is not None:
+    if profile_image is not None and not isinstance(profile_image, str) \
+            and profile_image != "" and profile_image.filename:
         path = await save_upload_file(
             profile_image,
             base_dir=settings.UPLOAD_DIR,
@@ -145,26 +157,39 @@ async def update_user(
             prefix=f"user_{user_id}_"
         )
         update["profile_image"] = path
+        delete_public_upload_safe(old.get("profile_image"))
 
     if not update:
         return {"message": "Nothing to update"}
 
     update["updated_at"] = datetime.now(timezone.utc)
-    res = await db.users.update_one({"_id": ObjectId(user_id)}, {"$set": update})
+    res = await db.users.update_one({"_id": ObjectId(user_id)},
+                                    {"$set": update})
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="User not found")
 
-    doc = await db.users.find_one({"_id": ObjectId(user_id)}, {"hashed_password": 0})
+    doc = await db.users.find_one({"_id": ObjectId(user_id)},
+                                  {"hashed_password": 0})
     doc["_id"] = str(doc["_id"])
     return {"message": "Updated", "user": doc}
 
 
 
-@router.delete("/{user_id}", dependencies=[Depends(require_admin)])
+@router.delete("/{user_id}")
 async def delete_user(user_id: str, db=Depends(get_db)):
     if not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=400, detail="Invalid user id")
+
+    # Ambil dulu untuk tahu path fotonya
+    doc = await db.users.find_one({"_id": ObjectId(user_id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="User not found")
+
     res = await db.users.delete_one({"_id": ObjectId(user_id)})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="User not found")
+
+    # Bersihkan file foto (jika ada). Gagal hapus = diabaikan.
+    delete_public_upload_safe(doc.get("profile_image"))
+
     return {"message": "Deleted"}

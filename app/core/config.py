@@ -14,8 +14,19 @@ class Settings(BaseModel):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
-    UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "uploads")
+    UPLOAD_DIR: str = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "uploads")
+
     USER_UPLOAD_SUBDIR: str = "users"
     PRODUCT_UPLOAD_SUBDIR: str = "products"
+
+    class Config:
+        case_sensitive = True
+
+    @property
+    def BASE_DIR(self) -> str:
+        """
+        BASE_DIR otomatis ke root project (misalnya: /path/to/fastapi-mongo-api)
+        """
+        return os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 
 settings = Settings()
