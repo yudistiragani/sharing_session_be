@@ -1,5 +1,6 @@
 import os
 
+from math import ceil
 from typing import Optional, List, Union, Annotated
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from bson import ObjectId
@@ -52,50 +53,79 @@ async def get_product_images(product_id: str, db=Depends(get_db)):
     return {"message": "OK", "images": image_info_list}
 
 @router.get("", dependencies=basic_access)
-async def list_products(
-    db=Depends(get_db),
+async def get_products(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
-    search: Optional[str] = Query(None, description="Cari by name/description"),
-    category: Optional[str] = Query(None),
-    min_price: Optional[float] = Query(None, ge=0),
-    max_price: Optional[float] = Query(None, ge=0),
+    search: Optional[str] = Query(None, description="Filter by name (contains)"),
+    category_id: Optional[str] = Query(None, description="Filter by category"),
+    status: Optional[str] = Query(None, pattern="^(active|inactive)$"),
+    sort_by: Optional[str] = Query("created_at", description="Column to sort by"),
+    order: Optional[str] = Query("desc", description="Sort order: asc or desc"),
+    db=Depends(get_db),
 ):
-    q = {}
-    ands = []
-    if search:
-        ands.append({"$or": [
-            {"name": {"$regex": search, "$options": "i"}},
-            {"description": {"$regex": search, "$options": "i"}},
-        ]})
-    if category:
-        ands.append({"category": {"$regex": f"^{category}$", "$options": "i"}})
-    if min_price is not None:
-        ands.append({"price": {"$gte": float(min_price)}})
-    if max_price is not None:
-        ands.append({"price": {"$lte": float(max_price)}})
-    if ands:
-        q = {"$and": ands}
+    """
+    Get paginated product list with optional filters and sorting.
+    """
 
-    total = await db.products.count_documents(q)
-    cursor = db.products.find(q).skip((page - 1) * page_size).limit(page_size).sort("created_at", -1)
+    query = {}
+    if search:
+        query["name"] = {"$regex": search, "$options": "i"}
+    if category_id and ObjectId.is_valid(category_id):
+        query["category_id"] = ObjectId(category_id)
+    if status:
+        query["status"] = status
+
+    # Tentukan kolom valid untuk sorting (hindari field yang tidak ada)
+    allowed_sort_fields = [
+        "name", "price", "stock", "low_stock_threshold",
+        "status", "created_at", "updated_at"
+    ]
+    if sort_by not in allowed_sort_fields:
+        sort_by = "created_at"
+
+    sort_dir = -1 if order.lower() == "desc" else 1
+
+    total = await db.products.count_documents(query)
+    pages = ceil(total / page_size) if total > 0 else 1
+
+    cursor = (
+        db.products.find(query)
+        .sort(sort_by, sort_dir)
+        .skip((page - 1) * page_size)
+        .limit(page_size)
+    )
+
     items = []
     async for doc in cursor:
-        doc["_id"] = str(doc["_id"])
-        # tambahkan nama kategori
+        # join category name
         if doc.get("category_id"):
-            cat = await db.categories.find_one({"_id": doc["category_id"]},
-                                               {"name": 1})
+            cat = await db.categories.find_one({"_id": doc["category_id"]}, {"name": 1})
             doc["category_name"] = cat["name"] if cat else None
         else:
             doc["category_name"] = None
 
+        # tambah info stok menipis
         doc["is_low_stock"] = bool(
-            doc.get("stock", 0) <= doc.get("low_stock_threshold", 0))
+            doc.get("stock", 0) <= doc.get("low_stock_threshold", 0)
+        )
+
+        # ambil thumbnail (gambar pertama)
+        images = doc.get("images", [])
+        doc["thumbnail"] = images[0] if images else None
+
         items.append(encode_mongo(doc))
 
-    pages = (total + page_size - 1) // page_size
-    return {"items": items, "meta": {"total": total, "page": page, "page_size": page_size, "pages": pages}}
+    return {
+        "meta": {
+            "page": page,
+            "page_size": page_size,
+            "pages": pages,
+            "total": total,
+            "sort_by": sort_by,
+            "order": order.lower(),
+        },
+        "items": items,
+    }
 
 @router.get("/{product_id}", dependencies=basic_access)
 async def get_product(product_id: str, db=Depends(get_db)):

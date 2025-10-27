@@ -57,19 +57,19 @@ async def login(
 
 @router.post("/logout")
 async def logout(token: str = Body(..., embed=True), db=Depends(get_db)):
-    payload = decode_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    jti = payload.get("jti")
-    exp = payload.get("exp")
-    if not jti or not exp:
-        raise HTTPException(status_code=400, detail="Bad token payload")
-
-    from datetime import datetime, timezone
-    expires_at = datetime.fromtimestamp(exp, tz=timezone.utc)
-    await db.revoked_tokens.update_one(
-        {"jti": jti},
-        {"$set": {"jti": jti, "expiresAt": expires_at}},
-        upsert=True
-    )
+    # payload = decode_token(token)
+    # if not payload:
+    #     raise HTTPException(status_code=401, detail="Invalid token")
+    # jti = payload.get("jti")
+    # exp = payload.get("exp")
+    # if not jti or not exp:
+    #     raise HTTPException(status_code=400, detail="Bad token payload")
+    #
+    # from datetime import datetime, timezone
+    # expires_at = datetime.fromtimestamp(exp, tz=timezone.utc)
+    # await db.revoked_tokens.update_one(
+    #     {"jti": jti},
+    #     {"$set": {"jti": jti, "expiresAt": expires_at}},
+    #     upsert=True
+    # )
     return {"message": "Logged out"}
