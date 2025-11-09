@@ -1,5 +1,7 @@
 import os
 
+from math import ceil
+
 from typing import Optional, Any
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from bson import ObjectId
@@ -7,13 +9,34 @@ from datetime import datetime, timezone
 from app.db.mongodb_config import get_db
 from app.core.config import settings
 from app.core.security import create_access_token, verify_password, hash_password, decode_token
-from app.api.v1.endpoints.utils import get_current_user, save_upload_file, require_admin, delete_public_upload_safe
+from app.api.v1.endpoints.utils import get_current_user, save_upload_file, require_admin, delete_public_upload_safe, encode_mongo
 
-router = APIRouter(tags=["Users"], dependencies=[Depends(require_admin)])
+dependencies = [Depends(require_admin)]
+
+router = APIRouter(tags=["Users"])
 # router = APIRouter(tags=["Users"], dependencies=None)
 
 
-@router.post("")
+@router.get("/me")
+async def get_me(
+    current_user=Depends(get_current_user),
+    db=Depends(get_db)
+):
+    """
+    Ambil data user yang sedang login (dari JWT token).
+    """
+    user = await db.users.find_one({"_id": current_user["_id"]})
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # jangan expose password
+    user.pop("password", None)
+
+    return {"user": encode_mongo(user)}
+
+
+@router.post("", dependencies=dependencies)
 async def create_user(
     email: str = Form(...),
     password: str = Form(...),
@@ -60,50 +83,71 @@ async def create_user(
     return {"message": "User created successfully", "user": user}
 
 
-@router.get("")
-async def list_users(
-    db=Depends(get_db),
+@router.get("", dependencies=dependencies)
+async def get_users(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
-    search: Optional[str] = Query(None, description="Cari by email/full_name"),
-    role: Optional[str] = Query(None, pattern="^(admin|user)$"),
+    search: Optional[str] = Query(None, description="Cari berdasarkan nama/email"),
+    role: Optional[str] = Query(None, description="Filter berdasarkan role (admin/user)"),
     status: Optional[str] = Query(None, pattern="^(active|inactive)$"),
-    phone: Optional[str] = Query(None, description="Filter nomor HP; partial/contains, case-insensitive"),
+    sort_by: Optional[str] = Query("created_at", description="Kolom untuk sorting"),
+    order: Optional[str] = Query("desc", description="Urutan: asc atau desc"),
+    db=Depends(get_db),
 ):
-    q = {}
-    ands = []
+    """
+    Ambil daftar user dengan pagination, filter, dan sorting.
+    """
+
+    query = {}
     if search:
-        ands.append({"$or": [
-            {"email": {"$regex": search, "$options": "i"}},
-            {"full_name": {"$regex": search, "$options": "i"}}
-        ]})
+        query["$or"] = [
+            {"username": {"$regex": search, "$options": "i"}},
+            {"email": {"$regex": search, "$options": "i"}}
+        ]
     if role:
-        ands.append({"role": role})
+        query["role"] = role
     if status:
-        ands.append({"status": status})
-    if phone:
-        # contains (partial), case-insensitive
-        ands.append({"phone_number": {"$regex": phone, "$options": "i"}})
+        query["status"] = status
 
-    if ands:
-        q = {"$and": ands}
+    # 🔧 Kolom yang diizinkan untuk sorting
+    allowed_sort_fields = [
+        "username", "email", "role", "status", "created_at", "updated_at"
+    ]
+    if sort_by not in allowed_sort_fields:
+        sort_by = "created_at"
 
-    total = await db.users.count_documents(q)
+    sort_dir = -1 if order.lower() == "desc" else 1
+
+    total = await db.users.count_documents(query)
+    pages = ceil(total / page_size) if total > 0 else 1
+
     cursor = (
-        db.users.find(q, {"hashed_password": 0})
+        db.users.find(query)
+        .sort(sort_by, sort_dir)
         .skip((page - 1) * page_size)
         .limit(page_size)
-        .sort("created_at", -1)
     )
+
     items = []
-    async for doc in cursor:
-        doc["_id"] = str(doc["_id"])
-        items.append(doc)
-    pages = (total + page_size - 1) // page_size
-    return {"items": items, "meta": {"total": total, "page": page, "page_size": page_size, "pages": pages}}
+    async for user in cursor:
+        # optional: hapus password field biar aman
+        user.pop("password", None)
+        items.append(encode_mongo(user))
+
+    return {
+        "meta": {
+            "page": page,
+            "page_size": page_size,
+            "pages": pages,
+            "total": total,
+            "sort_by": sort_by,
+            "order": order.lower(),
+        },
+        "items": items,
+    }
 
 
-@router.get("/{user_id}")
+@router.get("/{user_id}", dependencies=dependencies)
 async def get_user(user_id: str, db=Depends(get_db), current_user=Depends(get_current_user)):
     if not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=400, detail="Invalid user id")
@@ -117,7 +161,7 @@ async def get_user(user_id: str, db=Depends(get_db), current_user=Depends(get_cu
     return doc
 
 
-@router.put("/{user_id}")
+@router.put("/{user_id}", dependencies=dependencies)
 async def update_user(
     user_id: str,
     full_name: Optional[str] = Form(None),
@@ -175,7 +219,7 @@ async def update_user(
 
 
 
-@router.delete("/{user_id}")
+@router.delete("/{user_id}", dependencies=dependencies)
 async def delete_user(user_id: str, db=Depends(get_db)):
     if not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=400, detail="Invalid user id")
